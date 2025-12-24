@@ -1,0 +1,8 @@
+{
+  "name": "TaxWatch AI",
+  "description": "A premium, glossy, dark-themed fintech dashboard for citizens and officials to track tax allocation and report discrepancies using Gemini-powered insights.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
