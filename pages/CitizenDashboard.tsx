@@ -1,707 +1,589 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useAuth } from '../App';
 import { 
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, 
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, LabelList, ComposedChart 
+  BarChart, Bar, XAxis, YAxis, LabelList
 } from 'recharts';
-import { TAX_ALLOCATION_DATA, ICONS } from '../constants';
+import { ICONS } from '../constants';
 import { useNavigate } from 'react-router';
-import { TaxReport, TaxCategory, TaxNotification } from '../types';
-
-const GlassTooltip = ({ active, payload, label }: any) => {
-  if (active && payload && payload.length) {
-    const data = payload[0].payload;
-    return (
-      <div className="glossy-card p-4 rounded-2xl border border-white/20 shadow-2xl backdrop-blur-md">
-        <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">{data.name}</p>
-        <p className="text-lg font-black text-white">₹{(data.value * 14.2 / 10).toFixed(1)}T <span className="text-[10px] text-[#00d4ff] ml-1">({data.value}%)</span></p>
-        <p className="text-[8px] text-gray-500 uppercase font-bold mt-1 tracking-tighter">Verified Audit Data</p>
-      </div>
-    );
-  }
-  return null;
-};
-
-const SegmentCardTooltip = ({ active, payload }: any) => {
-  if (active && payload && payload.length) {
-    return (
-      <div className="bg-[#0a1929] border border-white/10 p-2 rounded-lg shadow-2xl">
-        <p className="text-[8px] font-black text-white uppercase tracking-tighter">
-          {payload[0].name}: ₹{payload[0].value.toLocaleString()} Cr
-        </p>
-      </div>
-    );
-  }
-  return null;
-};
+import { TaxReport, TaxCategory, TaxNotification, AppUser } from '../types';
+import Cropper, { Area } from 'react-easy-crop';
+import confetti from 'canvas-confetti';
+import { getRealTaxData } from '../geminiService';
 
 const CitizenDashboard: React.FC = () => {
-  const { user, logout, updateUser } = useAuth();
+  const { user, logout, updateUser, theme, toggleTheme } = useAuth();
   const navigate = useNavigate();
   
   const [showReportModal, setShowReportModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showNotifModal, setShowNotifModal] = useState(false);
   const [selectedReportDetail, setSelectedReportDetail] = useState<TaxReport | null>(null);
-  const [activeNotif, setActiveNotif] = useState<TaxNotification | null>(null);
+  const [isEditingReport, setIsEditingReport] = useState(false);
+  const [editFormData, setEditFormData] = useState({ description: '', proofUrls: [] as string[] });
+  
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [fullImage, setFullImage] = useState<string | null>(null);
+  const [isAIActive, setIsAIActive] = useState(true);
+  const [lastSync, setLastSync] = useState<string | null>(localStorage.getItem('taxwatch_last_sync'));
 
-  const [feedType, setFeedType] = useState<'my' | 'global'>('global');
   const [graphType, setGraphType] = useState<'pie' | 'bar'>('pie');
   const [reports, setReports] = useState<TaxReport[]>([]);
   const [taxData, setTaxData] = useState<TaxCategory[]>([]);
+  const [allocationData, setAllocationData] = useState<any[]>([]);
   const [notifications, setNotifications] = useState<TaxNotification[]>([]);
-  const [isProcessingFile, setIsProcessingFile] = useState(false);
+  const [loadingData, setLoadingData] = useState(false);
   
-  const [formData, setFormData] = useState({ taxType: 'Income Tax', description: '', proofUrl: '' });
+  const [formData, setFormData] = useState({ taxType: 'Income Tax', description: '', proofUrls: [] as string[] });
+  
   const [profileForm, setProfileForm] = useState({
     displayName: user?.displayName || '',
-    photoURL: user?.photoURL || ''
+    photoURL: user?.photoURL || '',
+    isPrivate: user?.isPrivate || false
   });
 
-  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (user) {
+      setProfileForm({
+        displayName: user.displayName || '',
+        photoURL: user.photoURL || '',
+        isPrivate: user.isPrivate || false
+      });
+    }
+  }, [user]);
+
+  const [imageToCrop, setImageToCrop] = useState<string | null>(null);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null);
+
   const profileInputRef = useRef<HTMLInputElement>(null);
   const reportInputRef = useRef<HTMLInputElement>(null);
+  const editReportInputRef = useRef<HTMLInputElement>(null);
+
+  const loadLocalData = useCallback(() => {
+    const storedReports = JSON.parse(localStorage.getItem('taxwatch_reports') || '[]');
+    const storedTaxData = JSON.parse(localStorage.getItem('taxwatch_tax_data') || '[]');
+    const storedNotifs = JSON.parse(localStorage.getItem('taxwatch_notifications') || '[]');
+    const storedAllocation = JSON.parse(localStorage.getItem('taxwatch_allocation') || '[]');
+    
+    const userReports = storedReports.filter((r: any) => r.citizenUid === user?.uid);
+    setReports(userReports);
+    setTaxData(storedTaxData);
+    
+    const userNotifs = storedNotifs.filter((n: any) => n.recipientUid === user?.uid);
+    setNotifications(userNotifs);
+    
+    if (storedAllocation.length > 0) {
+      setAllocationData(storedAllocation);
+    }
+  }, [user]);
+
+  const fetchAIData = async (force = false) => {
+    if (loadingData) return;
+    setLoadingData(true);
+    const sectors = await getRealTaxData();
+    if (sectors) {
+      setAllocationData(sectors);
+      localStorage.setItem('taxwatch_allocation', JSON.stringify(sectors));
+      const now = new Date().toLocaleTimeString();
+      setLastSync(now);
+      localStorage.setItem('taxwatch_last_sync', now);
+      setIsAIActive(true);
+      if (force) confetti({ particleCount: 100, spread: 70 });
+    }
+    setLoadingData(false);
+  };
 
   useEffect(() => {
-    const loadData = () => {
-      const storedReports = localStorage.getItem('taxwatch_reports');
-      const storedTaxData = localStorage.getItem('taxwatch_tax_data');
-      const storedNotifs = localStorage.getItem('taxwatch_notifications');
-      
-      if (storedReports) {
-        const allReports: TaxReport[] = JSON.parse(storedReports);
-        setReports(feedType === 'my' ? allReports.filter(r => r.citizenUid === user?.uid) : allReports);
-      }
-      if (storedTaxData) setTaxData(JSON.parse(storedTaxData));
-      if (storedNotifs) {
-        const allNotifs: TaxNotification[] = JSON.parse(storedNotifs);
-        setNotifications(allNotifs.filter(n => n.recipientUid === user?.uid));
-      }
-    };
-    loadData();
-    const interval = setInterval(loadData, 5000);
-    return () => clearInterval(interval);
-  }, [user, feedType]);
+    loadLocalData();
+    fetchAIData();
+  }, [loadLocalData]);
 
-  const markNotifRead = (id: string) => {
-    const allNotifs: TaxNotification[] = JSON.parse(localStorage.getItem('taxwatch_notifications') || '[]');
-    const updated = allNotifs.map(n => n.id === id ? { ...n, read: true } : n);
+  const markNotifsRead = () => {
+    const stored = JSON.parse(localStorage.getItem('taxwatch_notifications') || '[]');
+    const updated = stored.map((n: any) => n.recipientUid === user?.uid ? { ...n, read: true } : n);
     localStorage.setItem('taxwatch_notifications', JSON.stringify(updated));
-    setNotifications(updated.filter(n => n.recipientUid === user?.uid));
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
   };
 
-  const handleNotifClick = (notif: TaxNotification) => {
-    markNotifRead(notif.id);
-    setActiveNotif(notif);
+  const handleProfileSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    updateUser(profileForm);
+    setShowProfileModal(false);
+    setToastMessage("Identity protocol updated.");
   };
 
-  const jumpToReportFromNotif = (reportId: string) => {
-    setActiveNotif(null);
-    setShowNotifModal(false);
-    const targetReport = reports.find(r => r.id === reportId);
-    if (targetReport) {
-      setSelectedReportDetail(targetReport);
-    }
-  };
-
-  const handleDownloadReceipt = () => {
-    const receiptHash = Math.random().toString(36).substring(2, 12).toUpperCase();
-    const receiptContent = `
-=========================================
-      TAXWATCH AI - OFFICIAL RECEIPT
-=========================================
-TRANSACTION ID: TX-${receiptHash}
-DATE: ${new Date().toLocaleString()}
-CITIZEN NAME: ${user?.displayName || 'Anonymous'}
-CITIZEN EMAIL: ${user?.email}
-AUDIT SCORE: 780
------------------------------------------
-CONTRIBUTION FY 2024: ₹1,81,800.00
-STATUS: SECURELY VERIFIED
------------------------------------------
-This digital receipt is verified by the 
-National Treasury Command and TaxWatch AI 
-Fiscal Transparency Protocols.
-=========================================
-    `;
+  const handleUpdateReport = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedReportDetail) return;
     
-    const element = document.createElement("a");
-    const file = new Blob([receiptContent], {type: 'text/plain'});
-    element.href = URL.createObjectURL(file);
-    element.download = `TaxWatch_Receipt_${receiptHash.slice(0, 5)}.txt`;
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
-    alert("Receipt generated and downloaded successfully.");
+    const all = JSON.parse(localStorage.getItem('taxwatch_reports') || '[]');
+    const updatedReports = all.map((r: TaxReport) => 
+      r.id === selectedReportDetail.id 
+      ? { ...r, description: editFormData.description, proofUrls: editFormData.proofUrls, updatedAt: new Date().toISOString() } 
+      : r
+    );
+    
+    localStorage.setItem('taxwatch_reports', JSON.stringify(updatedReports));
+    loadLocalData();
+    setIsEditingReport(false);
+    setSelectedReportDetail(updatedReports.find(r => r.id === selectedReportDetail.id));
+    setToastMessage("Signal parameters calibrated successfully.");
+    confetti({ particleCount: 50 });
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, isProfile: boolean) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 1 * 1024 * 1024) {
-        alert("File too large. Please select an image under 1MB to ensure sync stability.");
-        return;
-      }
-      setIsProcessingFile(true);
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64String = reader.result as string;
-        if (isProfile) {
-          setProfileForm(prev => ({ ...prev, photoURL: base64String }));
-        } else {
-          setFormData(prev => ({ ...prev, proofUrl: base64String }));
-        }
-        e.target.value = '';
-        setIsProcessingFile(false);
-      };
-      reader.onerror = (err) => {
-        console.error("FileReader Error:", err);
-        alert("Failed to read the file. Please try again with a different image.");
-        setIsProcessingFile(false);
-      };
-      reader.readAsDataURL(file);
+  const handleCropDone = async () => {
+    if (imageToCrop && croppedAreaPixels) {
+      const img = await new Promise<HTMLImageElement>((resolve) => { 
+        const i = new Image(); 
+        i.onload = () => resolve(i); 
+        i.src = imageToCrop; 
+      });
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d')!;
+      canvas.width = croppedAreaPixels.width; canvas.height = croppedAreaPixels.height;
+      ctx.drawImage(img, croppedAreaPixels.x, croppedAreaPixels.y, croppedAreaPixels.width, croppedAreaPixels.height, 0, 0, croppedAreaPixels.width, croppedAreaPixels.height);
+      setProfileForm(p => ({ ...p, photoURL: canvas.toDataURL('image/jpeg') }));
+      setImageToCrop(null);
     }
+  };
+
+  const onCropComplete = useCallback((_ca: any, cap: Area) => setCroppedAreaPixels(cap), []);
+
+  const handleDownloadBill = () => {
+    const bill = `TAXWATCH AI - OFFICIAL FISCAL RECEIPT\nCitizen: ${user?.displayName}\nID: ${user?.uid}\nTax Paid: ₹${user?.taxPaid?.toLocaleString()}\nAudit Score: 780\nTimestamp: ${new Date().toLocaleString()}`;
+    const blob = new window.Blob([bill], { type: 'text/plain' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `tax_receipt_${user?.uid}.txt`;
+    link.click();
+    window.URL.revokeObjectURL(url);
+    setToastMessage("Verified fiscal receipt generated.");
   };
 
   const handleReportSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!user) return;
     const newReport: TaxReport = {
-      id: Math.random().toString(36).substring(7).toUpperCase(),
-      citizenUid: user?.uid || '',
-      citizenEmail: user?.email || '',
-      citizenName: user?.displayName || 'Anonymous Citizen',
+      id: `TW-${Math.random().toString(36).substring(2, 8).toUpperCase()}`,
+      citizenUid: user.uid,
+      citizenEmail: user.email,
+      citizenName: user.displayName || 'Anonymous',
+      citizenUsername: user.username || 'user',
       taxType: formData.taxType,
       description: formData.description,
-      proofUrl: formData.proofUrl,
+      proofUrls: formData.proofUrls,
       status: 'Pending',
       progress: 5,
       updates: [],
       createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      likes: [], dislikes: [], comments: []
     };
-
-    const allReports = JSON.parse(localStorage.getItem('taxwatch_reports') || '[]');
-    try {
-      localStorage.setItem('taxwatch_reports', JSON.stringify([newReport, ...allReports]));
-      setFormData({ taxType: taxData[0]?.name || 'Income Tax', description: '', proofUrl: '' });
-      setShowReportModal(false);
-      alert('Audit case synchronized with National Command.');
-    } catch (err) {
-      alert("Storage limit exceeded. Please try again with a smaller image or shorter text.");
-    }
+    const all = JSON.parse(localStorage.getItem('taxwatch_reports') || '[]');
+    localStorage.setItem('taxwatch_reports', JSON.stringify([newReport, ...all]));
+    setShowReportModal(false);
+    setFormData({ taxType: 'Income Tax', description: '', proofUrls: [] });
+    setToastMessage("Issue signal broadcasted to national nodes.");
+    loadLocalData();
+    confetti({ particleCount: 100, spread: 50 });
   };
 
-  const handleGraphInteraction = (data: any) => {
-    if (!data) return;
-    const categoryName = data.name || data.activePayload?.[0]?.payload?.name;
-    const category = taxData.find(c => c.name.toLowerCase().includes(categoryName?.toLowerCase()));
-    if (category) {
-      navigate(`/tax/${category.id}`);
-    }
-  };
-
-  const formatCurrency = (val: number) => `₹${val.toLocaleString()} Cr`;
   const unreadCount = notifications.filter(n => !n.read).length;
 
   return (
-    <div className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8 space-y-8 animate-in fade-in duration-700">
-      <input ref={profileInputRef} type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, true)} />
-      <input ref={reportInputRef} type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, false)} />
-
-      <header className="flex justify-between items-center pb-6 border-b border-gray-800">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[#00d4ff] rounded-xl flex items-center justify-center font-bold text-white shadow-lg cyan-glow text-lg uppercase tracking-tighter">Tax</div>
-          <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400 tracking-tighter uppercase">Audit Hub</h1>
-        </div>
-        <div className="flex items-center gap-4">
-          <button onClick={() => setShowNotifModal(true)} className="relative p-2 bg-[#132f4c] border border-white/10 rounded-xl hover:border-[#00d4ff]/50 transition-all group">
-             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400 group-hover:text-[#00d4ff]"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
-             {unreadCount > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 bg-[#ff00aa] text-white text-[8px] font-black flex items-center justify-center rounded-full animate-bounce">{unreadCount}</span>}
-          </button>
-          <button onClick={() => setShowProfileModal(true)} className="w-10 h-10 rounded-full bg-[#132f4c] border border-[#00d4ff]/30 flex items-center justify-center overflow-hidden hover:border-[#00d4ff] transition-all group">
-            {user?.photoURL ? <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" /> : <div className="text-[#00d4ff]"><ICONS.User /></div>}
-          </button>
-          <button onClick={logout} className="p-2 text-gray-400 hover:text-red-400 transition-colors"><ICONS.Logout /></button>
-        </div>
-      </header>
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-        <div className="lg:col-span-3 space-y-6">
-          <div className="glossy-card rounded-[32px] p-8 text-center shadow-xl border-t border-white/10">
-            <div className="relative group w-24 h-24 mx-auto mb-4">
-              <div className="w-24 h-24 rounded-full overflow-hidden border-2 border-[#00d4ff] flex items-center justify-center bg-[#0a1929] shadow-inner">
-                {user?.photoURL ? <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" /> : <div className="text-[#00d4ff] scale-150"><ICONS.User /></div>}
-              </div>
-              <button onClick={() => setShowProfileModal(true)} className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"><ICONS.Camera /></button>
-            </div>
-            <h3 className="text-xl font-bold text-white tracking-tight truncate px-2">{user?.displayName}</h3>
-            <p className="text-[10px] text-gray-500 font-black uppercase tracking-[0.2em] mt-1">Citizen Audit Score: 780</p>
-            
-            <div className="mt-8 space-y-3">
-              <button onClick={() => setShowReportModal(true)} className="w-full py-4 bg-gradient-to-r from-[#ff00aa] to-[#cc0088] text-white rounded-xl font-black shadow-lg magenta-glow transition-all hover:scale-[1.02] active:scale-95 text-[10px] uppercase tracking-widest">Open Audit Case</button>
-              <button onClick={handleDownloadReceipt} className="w-full py-3 bg-white/5 text-gray-400 border border-white/10 rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-white/10 transition-all">Download Receipt</button>
-            </div>
-          </div>
-          
-          <div className="glossy-card rounded-[24px] p-6 bg-gradient-to-b from-[#132f4c] to-[#0a1929]">
-            <h4 className="text-[9px] font-black text-gray-500 uppercase tracking-widest mb-4">Fiscal Contribution</h4>
-            <div className="space-y-4">
-              <div className="flex justify-between items-end">
-                <div>
-                  <p className="text-[8px] text-gray-600 uppercase font-bold tracking-widest">Contribution '24</p>
-                  <p className="text-xl font-black text-[#00ff9d] tracking-tighter">₹1,81,800</p>
-                </div>
-                <div className="text-[9px] text-[#00ff9d] font-black">+12.4%</div>
-              </div>
-              <div className="h-1.5 w-full bg-gray-800 rounded-full overflow-hidden">
-                <div className="h-full bg-gradient-to-r from-[#00d4ff] to-[#00ff9d]" style={{ width: '65%' }}></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-6 space-y-8">
-          <div className="glossy-card rounded-[32px] p-8 shadow-2xl relative">
-            <div className="flex justify-between items-center mb-8">
-              <div>
-                <h3 className="text-2xl font-black text-white uppercase tracking-tight">National Revenue Flow</h3>
-                <p className="text-[10px] text-gray-500 uppercase font-black tracking-widest mt-1">Strategic Expenditure Allocation (Total: ₹14.2T)</p>
-              </div>
-              <div className="flex bg-[#0a1929] p-1.5 rounded-2xl border border-white/10 shadow-inner">
-                <button 
-                  onClick={() => setGraphType('pie')} 
-                  className={`p-2.5 rounded-xl transition-all ${graphType === 'pie' ? 'bg-[#00d4ff] text-black shadow-lg' : 'text-gray-500 hover:text-white'}`}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>
-                </button>
-                <button 
-                  onClick={() => setGraphType('bar')} 
-                  className={`p-2.5 rounded-xl transition-all ${graphType === 'bar' ? 'bg-[#00d4ff] text-black shadow-lg' : 'text-gray-500 hover:text-white'}`}
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20v-6"></path><path d="M6 20V10"></path><path d="M18 20V4"></path></svg>
-                </button>
-              </div>
-            </div>
-            
-            <div className="w-full h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                {graphType === 'pie' ? (
-                  <PieChart>
-                    <Pie 
-                      data={TAX_ALLOCATION_DATA} 
-                      cx="50%" 
-                      cy="45%" 
-                      innerRadius={80} 
-                      outerRadius={105} 
-                      paddingAngle={6} 
-                      dataKey="value"
-                      stroke="none"
-                      onClick={(data) => handleGraphInteraction(data)}
-                      style={{ cursor: 'pointer' }}
-                      label={({ name, value }) => `${name} (${value}%)`}
-                      labelLine={{ stroke: 'rgba(255,255,255,0.2)', strokeWidth: 1 }}
-                    >
-                      {TAX_ALLOCATION_DATA.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
-                    </Pie>
-                    <Tooltip content={<GlassTooltip />} />
-                    <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: '10px', fontWeight: '900', letterSpacing: '0.05em', paddingTop: '30px' }}/>
-                  </PieChart>
-                ) : (
-                  <BarChart data={TAX_ALLOCATION_DATA} margin={{ top: 30, bottom: 10 }} onClick={(data) => handleGraphInteraction(data)}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                    <XAxis dataKey="name" stroke="#666" fontSize={10} axisLine={false} tickLine={false} />
-                    <YAxis hide />
-                    <Tooltip content={<GlassTooltip />} cursor={{ fill: 'rgba(255,255,255,0.05)' }} />
-                    <Bar dataKey="value" radius={[12, 12, 0, 0]} barSize={50} style={{ cursor: 'pointer' }}>
-                      {TAX_ALLOCATION_DATA.map((entry, index) => <Cell key={`bar-${index}`} fill={entry.color} />)}
-                      <LabelList dataKey="value" position="top" formatter={(v: any) => `${v}%`} style={{ fill: '#fff', fontSize: '10px', fontWeight: 'bold' }} />
-                    </Bar>
-                  </BarChart>
-                )}
-              </ResponsiveContainer>
-              <div className="absolute top-[45%] left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
-                <p className="text-[10px] text-gray-600 font-black uppercase tracking-[0.3em]">Aggregate</p>
-                <p className="text-3xl font-black text-white tracking-tighter">₹14.2T</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-6">
-            <h3 className="text-lg font-black text-white ml-2 uppercase tracking-tight">Audit Segment Command</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {taxData.map((type) => (
-                <button 
-                  key={type.id} 
-                  onClick={() => navigate(`/tax/${type.id}`)} 
-                  className="glossy-card p-6 rounded-[28px] group relative overflow-hidden h-64 hover:border-[#00d4ff]/40 transition-all flex flex-col active:scale-[0.98]"
-                >
-                  <div className="flex justify-between items-start mb-4 z-10">
-                    <div className="flex items-center gap-3">
-                      <div className="w-10 h-10 bg-[#132f4c] rounded-xl flex items-center justify-center text-[#00d4ff] group-hover:scale-110 transition-transform"><ICONS.Trend /></div>
-                      <div className="text-left">
-                        <span className="text-xs font-black text-white uppercase tracking-widest">{type.name}</span>
-                        <p className="text-[8px] text-gray-500 font-black uppercase tracking-widest">Tax Domain Hub</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-[8px] text-gray-600 font-black uppercase tracking-widest">Efficiency Index</p>
-                      <p className="text-sm text-[#00ff9d] font-black">{(type.taxUsed / type.taxAllocated * 100).toFixed(1)}%</p>
-                    </div>
-                  </div>
-
-                  {/* Detailed Mini Chart inside Card */}
-                  <div className="flex-1 w-full h-24 mb-4 z-10">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={[{ name: 'Metrics', collected: type.taxCollected, allocated: type.taxAllocated, used: type.taxUsed }]} margin={{ left: -35, right: 10 }}>
-                        <XAxis dataKey="name" hide />
-                        <YAxis hide />
-                        <Tooltip content={<SegmentCardTooltip />} />
-                        <Bar dataKey="collected" fill="#00d4ff" radius={[4, 4, 4, 4]} barSize={25} name="Total Inflow" />
-                        <Bar dataKey="allocated" fill="#ffffff" opacity={0.1} radius={[4, 4, 4, 4]} barSize={25} name="Budget Limit" />
-                        <Bar dataKey="used" fill="#ff00aa" radius={[4, 4, 4, 4]} barSize={25} name="Actual Deployment" />
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4 z-10">
-                    <div className="p-3 bg-[#0a1929]/50 rounded-2xl border border-white/5">
-                      <p className="text-[8px] text-gray-600 uppercase font-black tracking-widest mb-1">Total Inflow</p>
-                      <p className="text-xs text-white font-black tracking-tighter">{formatCurrency(type.taxCollected)}</p>
-                    </div>
-                    <div className="p-3 bg-[#0a1929]/50 rounded-2xl border border-white/5">
-                      <p className="text-[8px] text-gray-600 uppercase font-black tracking-widest mb-1">Deployed</p>
-                      <p className="text-xs text-[#ff00aa] font-black tracking-tighter">{formatCurrency(type.taxUsed)}</p>
-                    </div>
-                  </div>
-
-                  {/* Background Aura */}
-                  <div className="absolute top-0 right-0 w-32 h-32 bg-[#00d4ff]/5 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 group-hover:bg-[#00d4ff]/10 transition-colors"></div>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-3 space-y-6">
-          <div className="glossy-card rounded-[32px] p-8 flex flex-col h-[750px] shadow-2xl">
-            <div className="flex justify-between items-center mb-8">
-              <h4 className="text-[10px] font-black text-white uppercase tracking-[0.2em]">Audit Stream</h4>
-              <div className="flex bg-[#0a1929] p-1 rounded-xl border border-white/5">
-                <button onClick={() => setFeedType('global')} className={`px-3 py-1.5 text-[8px] font-black rounded-lg transition-all ${feedType === 'global' ? 'bg-[#00d4ff] text-black shadow-md' : 'text-gray-600'}`}>GLOBAL</button>
-                <button onClick={() => setFeedType('my')} className={`px-3 py-1.5 text-[8px] font-black rounded-lg transition-all ${feedType === 'my' ? 'bg-[#00d4ff] text-black shadow-md' : 'text-gray-600'}`}>MY FEED</button>
-              </div>
-            </div>
-            <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-5 pr-2 custom-scrollbar">
-              {reports.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full opacity-20 text-center">
-                  <ICONS.File />
-                  <p className="text-[9px] uppercase font-black tracking-widest mt-4">No cases logged in system</p>
-                </div>
-              ) : reports.map((r) => (
-                <button 
-                  key={r.id} 
-                  onClick={() => setSelectedReportDetail(r)}
-                  className="w-full text-left p-5 bg-white/5 rounded-3xl border border-white/5 group hover:border-[#00d4ff]/40 transition-all duration-300 relative overflow-hidden"
-                >
-                  <div className="flex justify-between items-start mb-3">
-                    <span className="text-[8px] font-black text-[#00d4ff] uppercase tracking-widest">{r.taxType}</span>
-                    <span className={`text-[7px] font-black px-2 py-0.5 rounded uppercase tracking-tighter shadow-sm ${
-                      r.status === 'Resolved' ? 'bg-green-500 text-white' : 
-                      r.status === 'Declined' ? 'bg-red-500 text-white' :
-                      r.status === 'Investigating' ? 'bg-yellow-500 text-white' : 'bg-blue-500 text-white'
-                    }`}>{r.status}</span>
-                  </div>
-                  <p className="text-xs font-bold text-white mb-1 tracking-tight">{r.citizenName}</p>
-                  <p className="text-[10px] text-gray-500 mb-4 leading-relaxed line-clamp-2">"{r.description}"</p>
-                  
-                  {r.proofUrl && (
-                    <div className="mb-4 rounded-2xl overflow-hidden border border-white/10 h-20 relative shadow-inner">
-                      <img src={r.proofUrl} alt="Evidence" className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700 opacity-40" />
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
-                         <span className="text-[8px] font-black text-white uppercase tracking-widest">Inspect Evidence</span>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1 h-1.5 bg-gray-900 rounded-full overflow-hidden shadow-inner">
-                      <div className="h-full bg-gradient-to-r from-[#00d4ff] to-[#00ff9d] transition-all duration-1000" style={{ width: `${r.progress}%` }}></div>
-                    </div>
-                    <span className="text-[9px] font-black text-gray-600">{r.progress}%</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Case Investigation Modal */}
-      {selectedReportDetail && (
-        <div 
-          className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/95 backdrop-blur-2xl animate-in zoom-in-95 duration-500"
-          onClick={() => setSelectedReportDetail(null)}
-        >
-          <div 
-            className="w-full max-w-5xl max-h-[90vh] glossy-card rounded-[48px] border border-white/10 shadow-[0_0_100px_rgba(0,0,0,0.8)] flex flex-col overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-10 border-b border-white/5 flex justify-between items-center bg-white/[0.02]">
-               <div className="flex items-center gap-6">
-                 <div className="w-14 h-14 bg-[#00d4ff]/10 rounded-[20px] flex items-center justify-center text-[#00d4ff] shadow-inner">
-                    <ICONS.File />
-                 </div>
-                 <div>
-                    <h3 className="text-3xl font-black text-white uppercase tracking-tighter">Investigation: {selectedReportDetail.id}</h3>
-                    <p className="text-xs text-gray-500 font-bold uppercase tracking-widest opacity-60">Verified National Audit Registry Log</p>
-                 </div>
-               </div>
-               <button onClick={() => setSelectedReportDetail(null)} className="w-12 h-12 bg-white/5 hover:bg-white/10 rounded-full flex items-center justify-center text-gray-400 transition-all border border-white/10">✕</button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-12 custom-scrollbar">
-               <div className="grid grid-cols-1 lg:grid-cols-2 gap-16">
-                  <div className="space-y-10">
-                     <section>
-                        <h4 className="text-[11px] font-black text-gray-600 uppercase tracking-[0.3em] mb-6">Reporter Identity</h4>
-                        <div className="p-8 bg-white/[0.03] rounded-[32px] border border-white/5 space-y-6 shadow-inner">
-                           <div className="flex items-center gap-4">
-                              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#132f4c] to-black flex items-center justify-center text-[#00d4ff] font-black text-sm border border-[#00d4ff]/30 shadow-lg">
-                                {selectedReportDetail.citizenName.charAt(0)}
-                              </div>
-                              <div>
-                                 <p className="text-lg font-bold text-white tracking-tight">{selectedReportDetail.citizenName}</p>
-                                 <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest">{selectedReportDetail.citizenEmail}</p>
-                              </div>
-                           </div>
-                           <div className="pt-6 border-t border-white/5">
-                              <span className="text-[9px] font-black text-[#00d4ff] uppercase tracking-[0.2em] block mb-3">Audit Domain: {selectedReportDetail.taxType}</span>
-                              <p className="text-gray-300 text-sm leading-relaxed italic opacity-90">"{selectedReportDetail.description}"</p>
-                           </div>
-                        </div>
-                     </section>
-
-                     {selectedReportDetail.proofUrl && (
-                        <section>
-                           <h4 className="text-[11px] font-black text-gray-600 uppercase tracking-[0.3em] mb-6">Evidence Depository</h4>
-                           <div className="rounded-[40px] overflow-hidden border border-white/10 shadow-[0_20px_60px_rgba(0,0,0,0.7)] aspect-video relative group">
-                              <img src={selectedReportDetail.proofUrl} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-1000" alt="Audit Evidence" />
-                              <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent flex items-end p-8">
-                                 <div className="flex justify-between items-center w-full">
-                                    <p className="text-[10px] text-white/40 font-black uppercase tracking-widest">Metadata: {new Date(selectedReportDetail.createdAt).toLocaleDateString()}</p>
-                                    <span className="text-[8px] bg-white/10 px-3 py-1 rounded-full text-white font-black uppercase">Verified Upload</span>
-                                 </div>
-                              </div>
-                           </div>
-                        </section>
-                     )}
-                  </div>
-
-                  <div className="space-y-10">
-                     <section>
-                        <h4 className="text-[11px] font-black text-gray-600 uppercase tracking-[0.3em] mb-6">National Command Verdicts</h4>
-                        <div className="space-y-5">
-                           {(selectedReportDetail.updates || []).length === 0 ? (
-                             <div className="p-10 text-center bg-white/[0.02] rounded-[32px] border border-dashed border-white/10 opacity-40">
-                                <div className="mb-4 flex justify-center"><ICONS.Robot /></div>
-                                <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest">Awaiting Command Response Sequence</p>
-                             </div>
-                           ) : selectedReportDetail.updates.map((upd, idx) => (
-                             <div key={idx} className="p-8 bg-gradient-to-br from-[#ff00aa]/5 to-transparent rounded-[32px] border border-[#ff00aa]/10 relative group">
-                                <div className="flex justify-between items-center mb-4">
-                                   <div className="flex items-center gap-3 text-[#ff00aa]">
-                                      <div className="w-8 h-8 rounded-lg bg-[#ff00aa]/10 flex items-center justify-center"><ICONS.Robot /></div>
-                                      <span className="text-[11px] font-black uppercase tracking-widest">Command Verdict</span>
-                                   </div>
-                                   <span className="text-[9px] text-gray-600 font-black uppercase">{new Date(upd.timestamp).toLocaleString()}</span>
-                                </div>
-                                <p className="text-gray-200 text-[13px] leading-relaxed shadow-sm">"{upd.text}"</p>
-                                {upd.mediaUrl && (
-                                  <div className="mt-6 rounded-2xl overflow-hidden border border-white/10 h-40 shadow-xl group-hover:border-[#ff00aa]/40 transition-all duration-500">
-                                     <img src={upd.mediaUrl} className="w-full h-full object-cover" alt="Official Attachment" />
-                                  </div>
-                                )}
-                             </div>
-                           ))}
-                        </div>
-                     </section>
-
-                     <section className="p-10 bg-gradient-to-r from-[#00d4ff]/10 to-transparent rounded-[40px] border border-[#00d4ff]/20 shadow-inner">
-                        <div className="flex justify-between items-center mb-6">
-                           <h4 className="text-[11px] font-black text-[#00d4ff] uppercase tracking-[0.3em]">Audit Resolution Pipeline</h4>
-                           <div className="flex items-center gap-2">
-                             <div className="w-2 h-2 rounded-full bg-[#00ff9d] animate-pulse"></div>
-                             <span className="text-[11px] font-black text-white uppercase">{selectedReportDetail.status}</span>
-                           </div>
-                        </div>
-                        <div className="h-2.5 w-full bg-black/40 rounded-full overflow-hidden mb-3 border border-white/5">
-                           <div className="h-full bg-gradient-to-r from-[#00d4ff] to-[#00ff9d] transition-all duration-1000 shadow-[0_0_10px_#00d4ff]" style={{ width: `${selectedReportDetail.progress}%` }}></div>
-                        </div>
-                        <div className="flex justify-between items-center">
-                           <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest opacity-60">Transparency Sync: Active</p>
-                           <p className="text-xs text-[#00ff9d] font-black tracking-tighter">{selectedReportDetail.progress}% Processed</p>
-                        </div>
-                     </section>
-                  </div>
-               </div>
-            </div>
-          </div>
+    <div className="max-w-7xl mx-auto px-6 py-12 space-y-12 animate-in fade-in duration-700 pb-32">
+      {fullImage && (
+        <div className="fixed inset-0 z-[6000] flex items-center justify-center p-4 bg-black/90 backdrop-blur-3xl animate-in fade-in zoom-in-95" onClick={() => setFullImage(null)}>
+           <div className="relative max-w-7xl max-h-screen">
+              <img src={fullImage} className="max-w-full max-h-[90vh] object-contain rounded-2xl shadow-2xl border border-white/10" />
+              <button className="absolute -top-12 -right-12 text-white text-3xl hover:scale-110 transition-transform font-black">✕</button>
+           </div>
         </div>
       )}
 
-      {/* Alert Detail Popup */}
-      {activeNotif && (
-        <div 
-          className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/90 backdrop-blur-xl animate-in zoom-in-95"
-          onClick={() => setActiveNotif(null)}
-        >
-          <div 
-            className="w-full max-w-sm glossy-card rounded-[40px] p-10 border border-[#ff00aa]/30 shadow-2xl text-center flex flex-col items-center"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="w-20 h-20 bg-[#ff00aa]/10 text-[#ff00aa] rounded-[24px] flex items-center justify-center mb-8 shadow-inner animate-pulse">
-               <ICONS.Alert />
-            </div>
-            <h4 className="text-xl font-black text-white uppercase tracking-tighter mb-2">Audit Synchronization</h4>
-            <p className="text-xs text-gray-500 uppercase font-black tracking-widest mb-6 opacity-60">National Command Command</p>
-            <p className="text-sm text-gray-300 italic mb-10 leading-relaxed px-2">"{activeNotif.message}"</p>
-            <div className="flex gap-4 w-full">
-               <button onClick={() => setActiveNotif(null)} className="flex-1 py-4 border border-gray-800 rounded-2xl text-[10px] font-black uppercase text-gray-500 hover:text-white transition-all">Dismiss</button>
-               <button onClick={() => jumpToReportFromNotif(activeNotif.reportId)} className="flex-1 py-4 bg-gradient-to-r from-[#00d4ff] to-[#008fb3] rounded-2xl text-[10px] font-black uppercase text-black shadow-lg cyan-glow transition-all active:scale-95">Inspect Case</button>
-            </div>
-          </div>
+      {toastMessage && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[5000] px-8 py-4 bg-[#00d4ff] text-black font-black uppercase tracking-widest rounded-2xl shadow-2xl animate-in slide-in-from-top-10">
+          {toastMessage}
+          {setTimeout(() => setToastMessage(null), 3000) && ""}
+        </div>
+      )}
+
+      {/* Report Detail Modal */}
+      {selectedReportDetail && (
+        <div className="fixed inset-0 z-[4500] bg-black/80 backdrop-blur-xl flex items-center justify-center p-6" onClick={() => { setSelectedReportDetail(null); setIsEditingReport(false); }}>
+           <div className="max-w-3xl w-full glossy-card rounded-[48px] p-10 space-y-8 max-h-[90vh] overflow-y-auto custom-scrollbar border-t-8 border-[#00d4ff]" onClick={e => e.stopPropagation()}>
+              <div className="flex justify-between items-start">
+                 <div>
+                    <p className="text-[#00d4ff] text-xs font-black uppercase tracking-widest mb-1">{selectedReportDetail.id}</p>
+                    <h2 className="text-3xl font-black text-white uppercase tracking-tighter">Signal Analysis</h2>
+                 </div>
+                 <button onClick={() => { setSelectedReportDetail(null); setIsEditingReport(false); }} className="p-3 bg-white/5 rounded-2xl hover:bg-white/10 text-gray-400">✕</button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                 <div className="space-y-6">
+                    <div className="p-6 bg-white/5 rounded-3xl border border-white/5">
+                       <p className="text-[10px] text-gray-500 font-black uppercase mb-3">Signal Parameters</p>
+                       <div className="space-y-4">
+                          <div>
+                             <p className="text-[9px] text-gray-600 font-bold uppercase">Classification</p>
+                             <p className="text-white font-bold">{selectedReportDetail.taxType}</p>
+                          </div>
+                          <div>
+                             <p className="text-[9px] text-gray-600 font-bold uppercase">Status</p>
+                             <span className="px-3 py-1 bg-[#00d4ff]/20 text-[#00d4ff] text-[10px] font-black rounded-lg uppercase">{selectedReportDetail.status}</span>
+                          </div>
+                       </div>
+                    </div>
+
+                    <div className="p-6 bg-white/5 rounded-3xl border border-white/5">
+                        <div className="flex justify-between items-center mb-4">
+                            <p className="text-[10px] text-gray-500 font-black uppercase">Observed Discrepancy</p>
+                            {!isEditingReport && selectedReportDetail.status !== 'Resolved' && (
+                                <button onClick={() => { setIsEditingReport(true); setEditFormData({ description: selectedReportDetail.description, proofUrls: selectedReportDetail.proofUrls || [] }); }} className="text-[9px] font-black text-[#00d4ff] uppercase hover:underline">Calibrate Log</button>
+                            )}
+                        </div>
+                        
+                        {isEditingReport ? (
+                            <form onSubmit={handleUpdateReport} className="space-y-4">
+                                <textarea 
+                                    value={editFormData.description} 
+                                    onChange={e => setEditFormData({...editFormData, description: e.target.value})}
+                                    className="w-full bg-[#030812] border border-white/10 rounded-2xl p-4 text-xs text-white outline-none focus:ring-1 focus:ring-[#00d4ff] min-h-[100px]"
+                                />
+                                <div className="flex flex-wrap gap-2">
+                                    {editFormData.proofUrls.map((url, i) => (
+                                        <div key={i} className="relative w-14 h-14 rounded-xl overflow-hidden group">
+                                            <img src={url} className="w-full h-full object-cover" />
+                                            <button type="button" onClick={() => setEditFormData({...editFormData, proofUrls: editFormData.proofUrls.filter((_, idx) => idx !== i)})} className="absolute inset-0 flex items-center justify-center bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity">✕</button>
+                                        </div>
+                                    ))}
+                                    <button type="button" onClick={() => editReportInputRef.current?.click()} className="w-14 h-14 bg-white/5 border border-dashed border-white/10 rounded-xl flex items-center justify-center text-gray-500 hover:text-[#00d4ff]"><ICONS.Plus /></button>
+                                    <input ref={editReportInputRef} type="file" multiple className="hidden" accept="image/*" onChange={e => {
+                                        if(e.target.files) {
+                                            Array.from(e.target.files).forEach((file: File) => {
+                                                const reader = new FileReader();
+                                                reader.onload = (ev) => setEditFormData(p => ({...p, proofUrls: [...p.proofUrls, ev.target?.result as string]}));
+                                                reader.readAsDataURL(file);
+                                            });
+                                        }
+                                    }} />
+                                </div>
+                                <div className="flex gap-2">
+                                    <button type="submit" className="flex-1 py-3 bg-[#00d4ff] text-black text-[10px] font-black rounded-xl uppercase">Commit Changes</button>
+                                    <button type="button" onClick={() => setIsEditingReport(false)} className="px-4 py-3 bg-white/5 text-gray-500 text-[10px] font-black rounded-xl uppercase">Abort</button>
+                                </div>
+                            </form>
+                        ) : (
+                            <p className="text-xs text-gray-300 leading-relaxed italic">"{selectedReportDetail.description}"</p>
+                        )}
+                    </div>
+
+                    <div className="flex flex-wrap gap-3">
+                       {selectedReportDetail.proofUrls?.map((url, i) => (
+                          <div key={i} className="w-20 h-20 rounded-2xl overflow-hidden cursor-pointer border border-white/5 hover:border-[#00d4ff] transition-all" onClick={() => setFullImage(url)}>
+                             <img src={url} className="w-full h-full object-cover" />
+                          </div>
+                       ))}
+                    </div>
+                 </div>
+
+                 <div className="space-y-6">
+                    <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest">Official Audit Feed</p>
+                    <div className="space-y-4 max-h-[500px] overflow-y-auto custom-scrollbar pr-2">
+                       {selectedReportDetail.updates.length === 0 ? (
+                          <div className="p-8 text-center bg-white/5 rounded-3xl border border-dashed border-white/10">
+                             <p className="text-[10px] text-gray-600 font-black uppercase tracking-widest">Awaiting official intercept...</p>
+                          </div>
+                       ) : (
+                          selectedReportDetail.updates.sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map(upd => (
+                             <div key={upd.id} className="p-6 bg-[#00d4ff]/5 border border-[#00d4ff]/20 rounded-3xl space-y-4">
+                                <div className="flex justify-between items-center">
+                                   <p className="text-[9px] font-black text-[#00ff9d] uppercase">Audit Response</p>
+                                   <p className="text-[8px] text-gray-600 font-bold uppercase">{new Date(upd.timestamp).toLocaleString()}</p>
+                                </div>
+                                <p className="text-xs text-white leading-relaxed">{upd.text}</p>
+                                {upd.mediaUrls && upd.mediaUrls.length > 0 && (
+                                   <div className="flex flex-wrap gap-2">
+                                      {upd.mediaUrls.map((m, i) => (
+                                         <div key={i} className="w-16 h-16 rounded-xl overflow-hidden border border-white/10 cursor-pointer" onClick={() => setFullImage(m)}>
+                                            <img src={m} className="w-full h-full object-cover" />
+                                         </div>
+                                      ))}
+                                   </div>
+                                )}
+                                <div className="pt-2 border-t border-white/5">
+                                   <p className="text-[8px] text-gray-500 font-black uppercase">Officer: @{upd.officialName}</p>
+                                </div>
+                             </div>
+                          ))
+                       )}
+                    </div>
+                 </div>
+              </div>
+           </div>
         </div>
       )}
 
       {/* Notification Modal */}
       {showNotifModal && (
-        <div 
-          className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in"
-          onClick={() => setShowNotifModal(false)}
-        >
-          <div 
-            className="w-full max-w-md glossy-card rounded-[40px] p-10 border border-[#00d4ff]/30 shadow-2xl relative overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-             <div className="flex justify-between items-center mb-8">
-                <h3 className="text-2xl font-black text-white uppercase tracking-tighter flex items-center gap-3">
-                   <div className="p-2 bg-[#00d4ff]/10 rounded-xl"><ICONS.Alert /></div>
-                   Audit Alerts
-                </h3>
-                <button onClick={() => setShowNotifModal(false)} className="text-gray-500 hover:text-white transition-colors">✕</button>
-             </div>
-             <div className="space-y-4 max-h-[450px] overflow-y-auto pr-3 custom-scrollbar">
-                {notifications.length === 0 ? (
-                  <div className="py-20 text-center opacity-30 flex flex-col items-center">
-                    <ICONS.Check />
-                    <p className="text-[10px] font-black uppercase tracking-widest mt-4">System Nominal: No Alerts</p>
-                  </div>
-                ) : (
-                  notifications.map(n => (
-                    <button 
-                      key={n.id} 
-                      onClick={() => handleNotifClick(n)}
-                      className={`w-full text-left p-5 rounded-3xl border transition-all ${n.read ? 'bg-white/[0.03] border-white/5 opacity-60' : 'bg-[#00d4ff]/10 border-[#00d4ff]/30 shadow-xl'}`}
-                    >
-                       <p className={`text-xs font-bold ${n.read ? 'text-gray-400' : 'text-white'} leading-relaxed`}>{n.message}</p>
-                       <div className="mt-3 flex justify-between items-center">
-                          <span className={`text-[8px] font-black px-2 py-0.5 rounded-full uppercase tracking-tighter ${n.status === 'Resolved' ? 'bg-green-500/20 text-green-400' : 'bg-[#00d4ff]/20 text-[#00d4ff]'}`}>{n.status}</span>
-                          <span className="text-[8px] text-gray-600 font-black uppercase">{new Date(n.timestamp).toLocaleTimeString()}</span>
+        <div className="fixed inset-0 z-[3500] bg-black/60 backdrop-blur-sm flex items-center justify-center p-6" onClick={() => { setShowNotifModal(false); markNotifsRead(); }}>
+           <div className="max-w-lg w-full glossy-card rounded-[40px] p-8 space-y-6 max-h-[80vh] overflow-y-auto custom-scrollbar border-t-4 border-[#00d4ff]" onClick={e => e.stopPropagation()}>
+              <div className="flex justify-between items-center mb-4">
+                 <h3 className="text-xl font-black text-white uppercase tracking-tighter">Neural Alert Feed</h3>
+                 <button onClick={() => { setShowNotifModal(false); markNotifsRead(); }} className="text-gray-500 hover:text-white">✕</button>
+              </div>
+              <div className="space-y-4">
+                 {notifications.length === 0 ? <p className="text-center text-gray-600 font-bold uppercase py-10">No alerts broadcasted.</p> : 
+                   notifications.sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).map(n => (
+                    <div key={n.id} className={`p-4 rounded-2xl border ${n.read ? 'bg-white/5 border-white/5' : 'bg-[#00d4ff]/10 border-[#00d4ff]/30'} transition-all`}>
+                       <div className="flex justify-between items-start mb-1">
+                          <p className="text-[9px] font-black uppercase text-[#00d4ff]">{n.type.replace('_', ' ')}</p>
+                          <p className="text-[8px] text-gray-600 uppercase font-bold">{new Date(n.timestamp).toLocaleDateString()}</p>
                        </div>
-                    </button>
-                  ))
-                )}
-             </div>
-          </div>
+                       <p className="text-xs text-gray-200">{n.message}</p>
+                       <p className="text-[9px] text-gray-500 font-bold mt-2">FROM: @{n.fromUserName}</p>
+                    </div>
+                 ))}
+              </div>
+              <button onClick={() => { setShowNotifModal(false); markNotifsRead(); }} className="w-full py-4 bg-white/5 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-white/10 transition-all mt-6">Acknowledge All</button>
+           </div>
         </div>
       )}
 
-      {/* Case Broadcast Modal */}
-      {showReportModal && (
-        <div 
-          className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm animate-in fade-in"
-          onClick={() => setShowReportModal(false)}
-        >
-          <div 
-            className="w-full max-w-lg glossy-card rounded-[40px] p-12 border border-[#ff00aa]/30 relative shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button type="button" onClick={() => setShowReportModal(false)} className="absolute top-10 right-10 text-gray-500 hover:text-white text-xl">✕</button>
-            <h3 className="text-3xl font-black text-white mb-2 tracking-tighter uppercase">Broadcast Audit</h3>
-            <p className="text-xs text-gray-500 mb-10 uppercase tracking-widest font-black opacity-60">Synchronizing formal discrepancy report with National Command.</p>
-            <form onSubmit={handleReportSubmit} className="space-y-8">
-              <div>
-                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-3 ml-1">Expenditure Domain</label>
-                <select value={formData.taxType} onChange={(e) => setFormData({...formData, taxType: e.target.value})} className="w-full bg-[#0a1929] border border-gray-700 rounded-2xl px-5 py-4 text-white outline-none focus:ring-2 focus:ring-[#ff00aa] text-xs font-black uppercase tracking-widest transition-all">
-                  {taxData.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
-                </select>
+      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-8 pb-10 border-b border-gray-800">
+        <div className="flex items-center gap-6">
+          <button onClick={() => setShowProfileModal(true)} className="w-14 h-14 bg-[#00d4ff]/10 border border-[#00d4ff]/30 rounded-2xl flex items-center justify-center overflow-hidden group hover:border-[#00d4ff] transition-all relative">
+             {user?.photoURL ? <img src={user.photoURL} className="w-full h-full object-cover" /> : <div className="font-black text-[#00d4ff]">ID</div>}
+             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"><ICONS.Edit /></div>
+          </button>
+          <div>
+            <h1 className="text-3xl font-black text-white tracking-tighter">{user?.displayName || 'Citizen'} Node</h1>
+            <div className="flex items-center gap-3 mt-1">
+              <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Verified Taxpayer: @{user?.username}</p>
+              <div className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest border ${isAIActive ? 'bg-[#00ff9d]/10 text-[#00ff9d] border-[#00ff9d]/30' : 'bg-orange-500/10 text-orange-400 border-orange-500/30'}`}>
+                Core Status: {isAIActive ? 'Active-Sync' : 'Safe-Mode'}
               </div>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+           <button onClick={() => setShowNotifModal(true)} className="relative p-4 bg-white/5 border border-white/10 rounded-2xl hover:border-[#00d4ff]/50 transition-all text-gray-400 group">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+              {unreadCount > 0 && <span className="absolute top-2 right-2 w-4 h-4 bg-red-500 text-white text-[8px] font-black rounded-full flex items-center justify-center animate-bounce">{unreadCount}</span>}
+           </button>
+           <button onClick={() => setShowReportModal(true)} className="px-6 py-3 bg-[#00d4ff] text-black rounded-xl text-[10px] font-black uppercase tracking-widest hover:scale-105 transition-all shadow-lg">Report Discrepancy</button>
+           <button onClick={toggleTheme} className="p-4 bg-white/5 border border-white/10 rounded-2xl hover:border-[#00d4ff]/50 transition-all text-gray-400">
+              {theme === 'dark' ? <ICONS.Sun /> : <ICONS.Moon />}
+           </button>
+           <button onClick={logout} className="p-4 text-gray-400 hover:text-red-400 transition-colors"><ICONS.Logout /></button>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-12">
+        <div className="lg:col-span-2 space-y-12">
+          <div className="glossy-card rounded-[40px] p-10 bg-gradient-to-br from-[#132f4c] to-[#0a1929] border-t-4 border-t-[#00d4ff] shadow-2xl">
+            <div className="flex justify-between items-center mb-10">
               <div>
-                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-3 ml-1">Factual Case Statement</label>
-                <textarea required rows={4} value={formData.description} onChange={(e) => setFormData({...formData, description: e.target.value})} className="w-full bg-[#0a1929] border border-gray-700 rounded-2xl px-5 py-4 text-sm text-white outline-none focus:ring-2 focus:ring-[#ff00aa] resize-none placeholder-gray-700" placeholder="Provide precise details of the audit discrepancy..." />
+                <h2 className="text-2xl font-black text-white tracking-tight uppercase">National allocation matrix</h2>
+                {lastSync && <p className="text-[8px] text-gray-600 font-bold uppercase tracking-widest">Last synced: {lastSync}</p>}
               </div>
-              <div>
-                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-3 ml-1">Visual Evidence Proof</label>
-                <div className="relative">
-                  {formData.proofUrl ? (
-                    <div className="relative w-full h-40 rounded-3xl overflow-hidden mb-2 shadow-2xl group border border-white/10">
-                      <img src={formData.proofUrl} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-1000" alt="Case Proof" />
-                      <button type="button" onClick={() => setFormData(p => ({...p, proofUrl: ''}))} className="absolute top-4 right-4 bg-red-500 text-white p-2 rounded-full shadow-2xl hover:bg-red-600 transition-colors border border-white/20">✕</button>
-                    </div>
-                  ) : (
-                    <button 
-                      type="button" 
-                      disabled={isProcessingFile}
-                      onClick={() => reportInputRef.current?.click()} 
-                      className={`flex flex-col items-center justify-center gap-3 w-full h-40 bg-[#0a1929] border-2 border-dashed border-gray-800 rounded-[32px] cursor-pointer hover:border-[#ff00aa]/60 transition-all group ${isProcessingFile ? 'animate-pulse opacity-50' : ''}`}
+              <div className="flex bg-[#030812] p-1 rounded-xl">
+                 <button onClick={() => setGraphType('pie')} className={`px-4 py-2 rounded-lg text-[9px] font-black uppercase ${graphType === 'pie' ? 'bg-[#00d4ff] text-black shadow-md' : 'text-gray-500'}`}>Pie</button>
+                 <button onClick={() => setGraphType('bar')} className={`px-4 py-2 rounded-lg text-[9px] font-black uppercase ${graphType === 'bar' ? 'bg-[#00d4ff] text-black shadow-md' : 'text-gray-500'}`}>Bar</button>
+              </div>
+            </div>
+            <div className="h-[400px]">
+              <ResponsiveContainer width="100%" height="100%">
+                {graphType === 'pie' ? (
+                  <PieChart>
+                    <Pie 
+                      data={allocationData} 
+                      cx="50%" 
+                      cy="50%" 
+                      innerRadius={80} 
+                      outerRadius={130} 
+                      paddingAngle={5} 
+                      dataKey="value" 
+                      stroke="none"
+                      label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
+                      labelLine={true}
                     >
-                      <div className="p-3 bg-white/5 rounded-2xl group-hover:text-[#ff00aa] transition-colors">
-                        <ICONS.Camera />
-                      </div>
-                      <span className="text-[10px] text-gray-600 font-black uppercase tracking-[0.2em] group-hover:text-gray-400">
-                        {isProcessingFile ? 'Processing...' : 'Capture/Select Evidence'}
-                      </span>
-                    </button>
-                  )}
+                      {allocationData.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} />)}
+                    </Pie>
+                    <Tooltip 
+                      formatter={(value, name, props) => [`₹${props.payload.amountCr} Cr (${value}%)`, `Sector: ${name}`]}
+                      contentStyle={{ background: '#0a1929', border: '1px solid #1e293b', borderRadius: '12px', fontSize: '11px', fontWeight: 'bold' }} 
+                    />
+                    <Legend wrapperStyle={{ paddingTop: '30px', fontSize: '10px', textTransform: 'uppercase', fontWeight: 'black' }} />
+                  </PieChart>
+                ) : (
+                  <BarChart data={allocationData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                    <XAxis dataKey="name" stroke="#444" fontSize={10} fontVariant="black" />
+                    <YAxis stroke="#444" fontSize={10} />
+                    <Tooltip cursor={{ fill: 'rgba(255,255,255,0.05)' }} contentStyle={{ background: '#0a1929', border: '1px solid #1e293b', borderRadius: '12px' }} />
+                    <Bar dataKey="value" fill="#00d4ff" radius={[10, 10, 0, 0]} name="Allocation (%)">
+                        <LabelList dataKey="value" position="top" fill="#00d4ff" fontSize={10} formatter={(v) => `${v}%`} />
+                    </Bar>
+                  </BarChart>
+                )}
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <h3 className="text-xl font-black text-white tracking-tight uppercase">National Treasury Nodes</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {taxData.map(cat => (
+                <div key={cat.id} className="glossy-card rounded-[32px] p-8 cursor-pointer hover:border-[#00d4ff]/40 transition-all group" onClick={() => navigate(`/tax/${cat.id}`)}>
+                  <div className="flex justify-between items-start mb-4">
+                    <h4 className="text-lg font-bold text-white group-hover:text-[#00d4ff] transition-colors">{cat.name}</h4>
+                    <ICONS.Trend />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-[10px] text-gray-500 font-bold uppercase">
+                      <span>Deployment Rate</span>
+                      <span>₹{cat.taxUsed.toLocaleString()} Cr ({( (cat.taxUsed / (cat.taxAllocated || 1)) * 100 ).toFixed(1)}%)</span>
+                    </div>
+                    <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full bg-[#00d4ff]" style={{ width: `${(cat.taxUsed / (cat.taxAllocated || 1)) * 100}%` }}></div>
+                    </div>
+                  </div>
                 </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-12">
+          <div className="glossy-card rounded-[40px] p-10 space-y-8">
+            <h3 className="text-xl font-black text-white tracking-tight uppercase">Verified Contributions</h3>
+            <div className="p-8 bg-[#00d4ff]/10 border border-[#00d4ff]/20 rounded-[32px] text-center shadow-inner">
+              <p className="text-[10px] text-[#00d4ff] font-bold uppercase mb-2">Total Tax Authenticated</p>
+              <p className="text-4xl font-black text-white tracking-tighter">₹{user?.taxPaid?.toLocaleString()}</p>
+            </div>
+            <button onClick={handleDownloadBill} className="w-full py-5 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-center gap-3 text-xs font-black uppercase hover:bg-white/10 transition-all shadow-md text-gray-300">
+              <ICONS.Download /> Download Fiscal Receipt
+            </button>
+          </div>
+
+          <div className="glossy-card rounded-[40px] p-10 space-y-8">
+            <h3 className="text-xl font-black text-white tracking-tight uppercase">My active signals</h3>
+            <div className="space-y-4 max-h-[400px] overflow-y-auto custom-scrollbar pr-2">
+               {reports.length === 0 ? <p className="text-gray-600 text-[10px] font-bold uppercase text-center py-10">No active signals.</p> :
+                 reports.map(r => (
+                   <div key={r.id} className="p-6 bg-white/5 rounded-3xl border border-white/5 space-y-3 hover:border-[#00d4ff]/30 transition-all cursor-pointer" onClick={() => setSelectedReportDetail(r)}>
+                      <div className="flex justify-between items-center">
+                         <p className="text-[10px] font-black text-white uppercase">{r.id}</p>
+                         <span className={`text-[8px] font-black px-3 py-1 rounded-lg uppercase ${r.status === 'Resolved' ? 'bg-[#00ff9d]/20 text-[#00ff9d]' : 'bg-blue-900/40 text-blue-400'}`}>{r.status}</span>
+                      </div>
+                      <p className="text-xs text-gray-400 line-clamp-1">{r.description}</p>
+                      <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
+                         <div className="h-full bg-[#00d4ff]" style={{ width: `${r.progress}%` }}></div>
+                      </div>
+                   </div>
+                 ))
+               }
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Profile Modal */}
+      {showProfileModal && (
+        <div className="fixed inset-0 z-[4000] bg-black/80 backdrop-blur-md flex items-center justify-center p-6" onClick={() => setShowProfileModal(false)}>
+          <div className="max-w-md w-full glossy-card rounded-[40px] p-10 border border-white/10" onClick={e => e.stopPropagation()}>
+            <h3 className="text-2xl font-black text-white mb-8 uppercase tracking-tighter text-center">Identity Calibration</h3>
+            <div className="relative w-32 h-32 mx-auto mb-10 group">
+              <div className="w-full h-full rounded-[40px] border-2 border-[#00d4ff]/40 overflow-hidden bg-[#030812] flex items-center justify-center p-1 shadow-2xl">
+                {profileForm.photoURL ? <img src={profileForm.photoURL} className="w-full h-full object-cover rounded-[32px]" /> : <div className="text-[#00d4ff] text-3xl font-black">?</div>}
               </div>
-              <button type="submit" className="w-full py-5 bg-gradient-to-r from-[#ff00aa] to-[#cc0088] text-white rounded-[24px] font-black uppercase tracking-widest text-[11px] shadow-2xl hover:scale-[1.02] active:scale-95 transition-all magenta-glow">Transmit Formal Audit</button>
+              <button onClick={() => profileInputRef.current?.click()} className="absolute bottom-0 right-0 w-10 h-10 bg-[#00d4ff] rounded-2xl flex items-center justify-center text-black border-4 border-[#030812] shadow-xl"><ICONS.Camera /></button>
+              <input ref={profileInputRef} type="file" className="hidden" accept="image/*" onChange={e => { const file = e.target.files?.[0]; if(file) { const r = new FileReader(); r.onload = () => setImageToCrop(r.result as string); r.readAsDataURL(file); }}} />
+            </div>
+            <form onSubmit={handleProfileSubmit} className="space-y-6">
+              <div className="space-y-2">
+                <label className="text-[10px] text-gray-500 font-bold uppercase ml-2">Public Signature</label>
+                <input type="text" value={profileForm.displayName} onChange={e => setProfileForm({...profileForm, displayName: e.target.value})} className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-white text-center font-black" placeholder="Display Name" />
+              </div>
+              <div className="flex gap-4">
+                <button type="button" onClick={() => setShowProfileModal(false)} className="flex-1 py-4 text-gray-500 font-bold uppercase">Cancel</button>
+                <button type="submit" className="flex-1 py-4 bg-[#00d4ff] text-black rounded-2xl font-black uppercase shadow-lg">Commit</button>
+              </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* Profile/Identity Modal */}
-      {showProfileModal && (
-        <div 
-          className="fixed inset-0 z-[250] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in zoom-in-95"
-          onClick={() => setShowProfileModal(false)}
-        >
-          <div 
-            className="w-full max-w-md glossy-card rounded-[48px] p-12 border border-[#00d4ff]/30 shadow-2xl text-center"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-3xl font-black text-white mb-2 tracking-tighter uppercase">Citizen ID</h3>
-            <p className="text-[10px] text-gray-500 font-black uppercase tracking-widest mb-10 opacity-60">Transparency Profile Command</p>
-            <div className="space-y-8">
-              <div className="w-28 h-28 rounded-full border-2 border-[#00d4ff] mx-auto overflow-hidden bg-[#0a1929] flex items-center justify-center shadow-[0_0_30px_rgba(0,212,255,0.2)] relative group">
-                {profileForm.photoURL ? <img src={profileForm.photoURL} alt="Preview" className="w-full h-full object-cover" /> : <div className="text-[#00d4ff] scale-[2.5]"><ICONS.User /></div>}
+      {/* Report Signal Modal */}
+      {showReportModal && (
+        <div className="fixed inset-0 z-[4000] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm" onClick={() => setShowReportModal(false)}>
+          <div className="glossy-card rounded-[32px] p-10 max-w-lg w-full max-h-[90vh] overflow-y-auto custom-scrollbar" onClick={e => e.stopPropagation()}>
+            <h2 className="text-2xl font-black text-white mb-6 uppercase tracking-tighter">Broadcast Discrepancy Signal</h2>
+            <form onSubmit={handleReportSubmit} className="space-y-6">
+              <div className="space-y-2">
+                <label className="text-[10px] text-gray-500 font-bold uppercase">Sector Domain</label>
+                <select 
+                  value={formData.taxType} 
+                  onChange={e => setFormData({...formData, taxType: e.target.value})}
+                  className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-white text-sm outline-none focus:ring-2 focus:ring-[#00d4ff]"
+                >
+                   {taxData.map(c => <option key={c.id} value={c.name} className="bg-[#0a1929]">{c.name}</option>)}
+                </select>
               </div>
-              <button 
-                type="button" 
-                disabled={isProcessingFile}
-                onClick={() => profileInputRef.current?.click()} 
-                className="bg-[#00d4ff]/10 text-[#00d4ff] text-[10px] font-black px-10 py-4 rounded-full border border-[#00d4ff]/30 hover:bg-[#00d4ff]/20 transition-all uppercase tracking-widest shadow-lg flex items-center gap-3 mx-auto"
-              >
-                <ICONS.Camera />
-                {isProcessingFile ? 'Processing...' : 'Update Identity Photo'}
-              </button>
-              <form onSubmit={(e) => { e.preventDefault(); updateUser(profileForm); setShowProfileModal(false); }} className="space-y-4 pt-4">
-                <input type="text" required value={profileForm.displayName} onChange={(e) => setProfileForm({...profileForm, displayName: e.target.value})} className="w-full bg-[#0a1929] border border-gray-700 rounded-2xl px-6 py-4 text-white text-center font-bold outline-none focus:ring-2 focus:ring-[#00d4ff] transition-all" placeholder="Legal Name / Alias" />
-                <button type="submit" className="w-full py-5 bg-[#00d4ff] text-black rounded-2xl font-black uppercase tracking-widest text-[11px] shadow-xl hover:opacity-90 active:scale-95 transition-all cyan-glow">Synchronize Identity</button>
-              </form>
-            </div>
+              <div className="space-y-2">
+                <label className="text-[10px] text-gray-500 font-bold uppercase">Intelligence description</label>
+                <textarea 
+                  required 
+                  value={formData.description} 
+                  onChange={e => setFormData({...formData, description: e.target.value})}
+                  className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-white text-sm outline-none focus:ring-2 focus:ring-[#00d4ff] min-h-[120px]"
+                  placeholder="Describe the discrepancy in detail..."
+                />
+              </div>
+              <div className="space-y-4">
+                <label className="text-[10px] text-gray-500 font-bold uppercase">Evidence Logs</label>
+                <div className="flex flex-wrap gap-3">
+                  {formData.proofUrls.map((url, i) => (
+                    <div key={i} className="relative w-20 h-20 rounded-xl overflow-hidden group">
+                       <img src={url} className="w-full h-full object-cover" />
+                       <button type="button" onClick={() => setFormData({...formData, proofUrls: formData.proofUrls.filter((_, idx) => idx !== i)})} className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity text-white">✕</button>
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => reportInputRef.current?.click()} className="w-20 h-20 bg-white/5 border-2 border-dashed border-white/10 rounded-xl flex items-center justify-center text-gray-500 hover:text-[#00d4ff] hover:border-[#00d4ff] transition-all"><ICONS.Plus /></button>
+                  <input ref={reportInputRef} type="file" multiple className="hidden" accept="image/*" onChange={e => {
+                    if(e.target.files) {
+                      Array.from(e.target.files).forEach((file: File) => {
+                        const reader = new FileReader();
+                        reader.onload = (ev) => setFormData(p => ({...p, proofUrls: [...p.proofUrls, ev.target?.result as string]}));
+                        reader.readAsDataURL(file);
+                      });
+                    }
+                  }} />
+                </div>
+              </div>
+              <div className="flex gap-4 pt-4">
+                <button type="button" onClick={() => setShowReportModal(false)} className="flex-1 py-4 text-gray-500 font-bold uppercase tracking-widest text-[10px]">Abort</button>
+                <button type="submit" className="flex-1 py-4 bg-[#00d4ff] text-black font-black rounded-2xl uppercase shadow-xl active:scale-95 transition-all tracking-widest text-[10px]">Transmit Signal</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Image Cropper */}
+      {imageToCrop && (
+        <div className="fixed inset-0 z-[5000] bg-black flex flex-col items-center justify-center p-10">
+          <div className="relative w-full max-w-xl aspect-square mb-10">
+            <Cropper image={imageToCrop} crop={crop} zoom={zoom} aspect={1} onCropChange={setCrop} onCropComplete={onCropComplete} onZoomChange={setZoom} />
+          </div>
+          <div className="flex gap-4 w-full max-w-xl">
+             <button onClick={() => setImageToCrop(null)} className="flex-1 py-4 text-gray-400 font-bold uppercase">Abort</button>
+             <button onClick={handleCropDone} className="flex-[2] py-4 bg-[#00ff9d] text-black font-black rounded-2xl uppercase">Process Frame</button>
           </div>
         </div>
       )}

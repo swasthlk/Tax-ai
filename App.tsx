@@ -1,6 +1,5 @@
 
 import React, { useState, useEffect, createContext, useContext } from 'react';
-// Fix: Use react-router instead of react-router-dom to match available exports in current environment
 import { HashRouter, Routes, Route, Navigate } from 'react-router';
 import Login from './pages/Login';
 import CitizenDashboard from './pages/CitizenDashboard';
@@ -13,9 +12,11 @@ import { INITIAL_TAX_DATA } from './constants';
 interface AuthContextType {
   user: AppUser | null;
   loading: boolean;
+  theme: 'dark' | 'light';
   login: (userData: AppUser) => void;
   logout: () => void;
   updateUser: (updates: Partial<AppUser>) => void;
+  toggleTheme: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -29,6 +30,9 @@ export const useAuth = () => {
 const App: React.FC = () => {
   const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [theme, setTheme] = useState<'dark' | 'light'>(
+    (localStorage.getItem('taxwatch_theme') as 'dark' | 'light') || 'dark'
+  );
 
   useEffect(() => {
     // Initialize session
@@ -45,6 +49,16 @@ const App: React.FC = () => {
 
     setLoading(false);
   }, []);
+
+  useEffect(() => {
+    // Apply theme class to body
+    if (theme === 'light') {
+      document.body.classList.add('light-mode');
+    } else {
+      document.body.classList.remove('light-mode');
+    }
+    localStorage.setItem('taxwatch_theme', theme);
+  }, [theme]);
 
   const login = (userData: AppUser) => {
     setUser(userData);
@@ -70,6 +84,10 @@ const App: React.FC = () => {
     }
   };
 
+  const toggleTheme = () => {
+    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  };
+
   if (loading) return (
     <div className="h-screen w-screen flex items-center justify-center bg-[#0a1929]">
       <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-[#00d4ff]"></div>
@@ -77,9 +95,9 @@ const App: React.FC = () => {
   );
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout, updateUser }}>
+    <AuthContext.Provider value={{ user, loading, theme, login, logout, updateUser, toggleTheme }}>
       <HashRouter>
-        <div className="min-h-screen bg-[#0a1929] text-gray-200">
+        <div className={`min-h-screen transition-colors duration-300 ${theme === 'dark' ? 'bg-[#0a1929]' : 'bg-[#f8fafc]'} text-gray-200`}>
           <Routes>
             <Route path="/login" element={!user ? <Login /> : <Navigate to="/" />} />
             <Route 
